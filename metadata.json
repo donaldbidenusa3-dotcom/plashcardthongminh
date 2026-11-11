@@ -1,0 +1,6 @@
+{
+  "name": "QuizMaster AI - Học Flashcard & Tạo Thẻ Thông Minh",
+  "description": "Nền tảng học tập flashcard thông minh chuẩn Quizlet với AI tự động tạo thẻ từ tài liệu, câu hỏi và đa dạng chế độ học Flashcards, Learn, Test, Match, Write.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
