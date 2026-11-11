@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 import mammoth from 'mammoth';
-import { Card } from '../types';
+import { Card } from '../types/index';
 
 export interface ParsedExamResult {
   title: string;
@@ -14,8 +14,9 @@ export interface ParsedExamResult {
 /**
  * Clean and normalize text
  */
-function cleanLine(text: string): string {
-  return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+export function cleanLine(text: any): string {
+  if (text === null || text === undefined) return '';
+  return String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
 }
 
 /**
@@ -23,14 +24,15 @@ function cleanLine(text: string): string {
  */
 export function extractAnswerSheet(fullText: string): Map<number, string> {
   const answerMap = new Map<number, string>();
+  if (!fullText) return answerMap;
 
   // Look for section titled "BẢNG ĐÁP ÁN" or "ĐÁP ÁN" or "ANSWER KEY"
-  const answerSheetRegex = /(?:bảng\s*đáp\s*án|đáp\s*án|answer\s*key|hướng\s*dẫn\s*chấm)[\s\S]*$/i;
+  const answerSheetRegex = /(?:bảng\s*đáp\s*án|bảng\s*chấm|đáp\s*án|answer\s*key|hướng\s*dẫn\s*chấm)[\s\S]*$/i;
   const match = fullText.match(answerSheetRegex);
   const searchArea = match ? match[0] : fullText;
 
-  // Pattern: 1.A, 1-A, 1:A, 1A, Câu 1: A, Câu 1. A
-  const itemRegex = /(?:câu\s*)?(\d+)[\s.:-]*\s*([A-D])/gi;
+  // Pattern: 1.A, 1-A, 1:A, 1A, Câu 1: A, Câu 1. A, 1) A
+  const itemRegex = /(?:câu\s*)?(\d+)[\s.:\)\/-]*\s*([A-D])/gi;
   let m: RegExpExecArray | null;
   while ((m = itemRegex.exec(searchArea)) !== null) {
     const qNum = parseInt(m[1], 10);
@@ -52,11 +54,11 @@ export async function parseExcelExam(fileBuffer: ArrayBuffer, fileName: string):
   const worksheet = workbook.Sheets[firstSheetName];
   const rows: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
 
-  if (rows.length === 0) {
+  if (!rows || rows.length === 0) {
     throw new Error('Tệp Excel không có dữ liệu.');
   }
 
-  // Detect header row or column indices
+  // Detect column mapping
   let qCol = -1;
   let aCol = -1;
   let bCol = -1;
@@ -67,25 +69,25 @@ export async function parseExcelExam(fileBuffer: ArrayBuffer, fileName: string):
 
   let startRowIdx = 0;
 
-  // Scan first 5 rows for header names
-  for (let r = 0; r < Math.min(5, rows.length); r++) {
+  // Check header in first 3 rows
+  for (let r = 0; r < Math.min(3, rows.length); r++) {
     const row = rows[r];
     if (!row || !Array.isArray(row)) continue;
 
     row.forEach((cell, colIdx) => {
-      const val = String(cell || '').toLowerCase().trim();
-      if (val.includes('câu hỏi') || val.includes('nội dung') || val.includes('question')) {
+      const val = cleanLine(cell).toLowerCase();
+      if (val.includes('câu hỏi') || val.includes('nội dung') || val.includes('question') || val.includes('thuật ngữ')) {
         qCol = colIdx;
         startRowIdx = r + 1;
-      } else if (val === 'a' || val.includes('đáp án a') || val.includes('lựa chọn a') || val.includes('option a')) {
+      } else if (val === 'a' || val.includes('đáp án a') || val.includes('option a') || val.includes('lựa chọn a')) {
         aCol = colIdx;
-      } else if (val === 'b' || val.includes('đáp án b') || val.includes('lựa chọn b') || val.includes('option b')) {
+      } else if (val === 'b' || val.includes('đáp án b') || val.includes('option b') || val.includes('lựa chọn b')) {
         bCol = colIdx;
-      } else if (val === 'c' || val.includes('đáp án c') || val.includes('lựa chọn c') || val.includes('option c')) {
+      } else if (val === 'c' || val.includes('đáp án c') || val.includes('option c') || val.includes('lựa chọn c')) {
         cCol = colIdx;
-      } else if (val === 'd' || val.includes('đáp án d') || val.includes('lựa chọn d') || val.includes('option d')) {
+      } else if (val === 'd' || val.includes('đáp án d') || val.includes('option d') || val.includes('lựa chọn d')) {
         dCol = colIdx;
-      } else if (val.includes('đáp án đúng') || val.includes('đáp án') || val.includes('answer') || val.includes('key')) {
+      } else if (val.includes('đáp án đúng') || val === 'đáp án' || val.includes('answer') || val.includes('định nghĩa')) {
         ansCol = colIdx;
       } else if (val.includes('giải thích') || val.includes('explanation')) {
         explainCol = colIdx;
@@ -95,15 +97,22 @@ export async function parseExcelExam(fileBuffer: ArrayBuffer, fileName: string):
     if (qCol !== -1) break;
   }
 
-  // If no explicit header names found, assume default column order: Col 0: Question, 1: A, 2: B, 3: C, 4: D, 5: Answer
+  // Fallback default column layout
   if (qCol === -1) {
     qCol = 0;
-    aCol = 1;
-    bCol = 2;
-    cCol = 3;
-    dCol = 4;
-    ansCol = 5;
-    startRowIdx = typeof rows[0]?.[0] === 'string' && rows[0][0].toLowerCase().includes('câu') ? 0 : 1;
+    // Check if 2-column vocabulary sheet
+    const maxCols = Math.max(...rows.slice(0, 5).map((r) => r?.length || 0));
+    if (maxCols <= 3) {
+      ansCol = 1;
+    } else {
+      aCol = 1;
+      bCol = 2;
+      cCol = 3;
+      dCol = 4;
+      ansCol = 5;
+    }
+    const firstCell = cleanLine(rows[0]?.[0]).toLowerCase();
+    startRowIdx = firstCell.includes('câu') || firstCell.includes('question') || firstCell.length > 30 ? 0 : 1;
   }
 
   const cards: Card[] = [];
@@ -113,59 +122,65 @@ export async function parseExcelExam(fileBuffer: ArrayBuffer, fileName: string):
     const row = rows[i];
     if (!row || row.length === 0) continue;
 
-    const questionText = cleanLine(String(row[qCol] || ''));
+    const questionText = cleanLine(row[qCol]);
     if (!questionText) continue;
 
-    const optA = cleanLine(String(row[aCol] || ''));
-    const optB = cleanLine(String(row[bCol] || ''));
-    const optC = cleanLine(String(row[cCol] || ''));
-    const optD = cleanLine(String(row[dCol] || ''));
+    const optA = aCol !== -1 ? cleanLine(row[aCol]) : '';
+    const optB = bCol !== -1 ? cleanLine(row[bCol]) : '';
+    const optC = cCol !== -1 ? cleanLine(row[cCol]) : '';
+    const optD = dCol !== -1 ? cleanLine(row[dCol]) : '';
 
-    const rawAns = cleanLine(String(row[ansCol] || '')).toUpperCase();
-    const explanation = explainCol !== -1 ? cleanLine(String(row[explainCol] || '')) : '';
+    const rawAns = ansCol !== -1 ? cleanLine(row[ansCol]) : '';
+    const explanation = explainCol !== -1 ? cleanLine(row[explainCol]) : '';
 
     const options = [optA, optB, optC, optD].filter(Boolean);
 
-    // Determine correct option
+    let frontFormatted = '';
+    let backFormatted = '';
     let correctIndex = -1;
-    let correctLetter = 'A';
+    let isMissing = false;
 
-    if (rawAns.includes('A') || rawAns === optA.toUpperCase()) {
+    if (options.length >= 2) {
+      // Multiple choice mode
+      const rawAnsUpper = rawAns.toUpperCase();
+      let correctLetter = 'A';
+      if (rawAnsUpper.includes('A') || (optA && rawAnsUpper === optA.toUpperCase())) {
+        correctIndex = 0;
+        correctLetter = 'A';
+      } else if (rawAnsUpper.includes('B') || (optB && rawAnsUpper === optB.toUpperCase())) {
+        correctIndex = 1;
+        correctLetter = 'B';
+      } else if (rawAnsUpper.includes('C') || (optC && rawAnsUpper === optC.toUpperCase())) {
+        correctIndex = 2;
+        correctLetter = 'C';
+      } else if (rawAnsUpper.includes('D') || (optD && rawAnsUpper === optD.toUpperCase())) {
+        correctIndex = 3;
+        correctLetter = 'D';
+      } else {
+        isMissing = true;
+        missingAnswerCount += 1;
+        correctIndex = 0;
+        correctLetter = 'A';
+      }
+
+      const correctContent = options[correctIndex] || optA || '';
+      frontFormatted = `${questionText}\n\nA. ${optA || '...'}\nB. ${optB || '...'}\nC. ${optC || '...'}\nD. ${optD || '...'}`;
+      backFormatted = `Đáp án đúng: ${correctLetter}. ${correctContent}${
+        explanation ? `\n\n💡 Giải thích: ${explanation}` : ''
+      }`;
+    } else {
+      // 2-column Q&A mode
+      frontFormatted = questionText;
+      backFormatted = rawAns || 'Đáp án';
       correctIndex = 0;
-      correctLetter = 'A';
-    } else if (rawAns.includes('B') || rawAns === optB.toUpperCase()) {
-      correctIndex = 1;
-      correctLetter = 'B';
-    } else if (rawAns.includes('C') || rawAns === optC.toUpperCase()) {
-      correctIndex = 2;
-      correctLetter = 'C';
-    } else if (rawAns.includes('D') || rawAns === optD.toUpperCase()) {
-      correctIndex = 3;
-      correctLetter = 'D';
     }
-
-    const isMissing = correctIndex === -1;
-    if (isMissing) {
-      missingAnswerCount += 1;
-      correctIndex = 0; // fallback
-    }
-
-    const correctText = options[correctIndex] || optA || '';
-
-    // Build Front: Question + 4 Options clearly formatted
-    const frontFormatted = `${questionText}\n\nA. ${optA}\nB. ${optB}\nC. ${optC}\nD. ${optD}`;
-
-    // Build Back: Correct Answer
-    const backFormatted = `Đáp án đúng: ${correctLetter}. ${correctText}${
-      explanation ? `\n\n💡 Giải thích: ${explanation}` : ''
-    }`;
 
     cards.push({
       id: `c-excel-${i}-${Date.now()}`,
       front: frontFormatted,
       back: backFormatted,
-      hint: explanation ? `Xem giải thích: ${explanation.slice(0, 80)}...` : '',
-      options: [optA, optB, optC, optD],
+      hint: explanation ? `Gợi ý: ${explanation.slice(0, 80)}...` : '',
+      options: options.length >= 2 ? [optA, optB, optC, optD] : undefined,
       correctIndex,
       explanation,
       isAiSuggested: isMissing,
@@ -174,7 +189,9 @@ export async function parseExcelExam(fileBuffer: ArrayBuffer, fileName: string):
     });
   }
 
-  const title = fileName.replace(/\.[^/.]+$/, '').replace(/[_\\-]/g, ' ');
+  const title = (fileName || 'Bộ đề thi trắc nghiệm')
+    .replace(/\.[^/.]+$/, '')
+    .replace(/[_\\-]/g, ' ');
 
   return {
     title: title || 'Bộ đề thi trắc nghiệm',
@@ -190,9 +207,17 @@ export async function parseExcelExam(fileBuffer: ArrayBuffer, fileName: string):
  * Parse Word Document (.docx)
  */
 export async function parseDocxExam(arrayBuffer: ArrayBuffer, fileName: string): Promise<ParsedExamResult> {
-  const result = await mammoth.extractRawText({ arrayBuffer });
-  const rawText = result.value;
-  return parseTextExam(rawText, fileName, 'docx');
+  try {
+    const result = await mammoth.extractRawText({ arrayBuffer });
+    const rawText = result.value || '';
+    if (!rawText.trim()) {
+      throw new Error('Tệp Word trống hoặc không có nội dung chữ.');
+    }
+    return parseTextExam(rawText, fileName, 'docx');
+  } catch (err: any) {
+    console.warn('Browser mammoth parse error:', err);
+    throw err;
+  }
 }
 
 /**
@@ -205,14 +230,62 @@ export function parseTextExam(
   formatType: 'docx' | 'txt_regex' | 'quizlet' = 'txt_regex'
 ): ParsedExamResult {
   const normalizedText = cleanLine(rawText);
+  if (!normalizedText) {
+    return {
+      title: fileName || 'Bộ thẻ mới',
+      totalFound: 0,
+      cards: [],
+      hasAnswers: false,
+      missingAnswerCount: 0,
+      formatType,
+    };
+  }
 
   // 1. Check for answer sheet table at end of file
   const answerSheetMap = extractAnswerSheet(normalizedText);
 
   // 2. Identify question boundaries
-  // Matches "Câu 1:", "Câu 1.", "Bài 1:", "Question 1:", or "1." at beginning of lines
-  const questionSplitter = /(?:^|\n)(?=(?:câu|bài|question)\s*\d+[:.]|\d+[\.\)])/i;
-  const rawChunks = normalizedText.split(questionSplitter).map((c) => c.trim()).filter(Boolean);
+  // Matches "Câu 1:", "Câu 1.", "Câu 1 -", "Bài 1:", "Question 1:", or "1.", "1)", "1/"
+  const questionSplitter = /(?:^|\n)(?=(?:câu|bài|question|câu\s*hỏi)\s*\d+[\s:.-]|\d+[\.\)\/:\-]\s*)/i;
+  let rawChunks = normalizedText.split(questionSplitter).map((c) => c.trim()).filter(Boolean);
+
+  // Fallback 1: If questionSplitter didn't find multiple chunks, try double newlines
+  if (rawChunks.length <= 1) {
+    const paragraphChunks = normalizedText.split(/\n\s*\n+/).map((c) => c.trim()).filter(Boolean);
+    if (paragraphChunks.length > 1) {
+      rawChunks = paragraphChunks;
+    }
+  }
+
+  // Fallback 2: Tab-separated or Quizlet format (Term \t Definition)
+  if (rawChunks.length <= 1 && normalizedText.includes('\t')) {
+    const lines = normalizedText.split('\n').map((l) => l.trim()).filter(Boolean);
+    const quizletCards: Card[] = [];
+    lines.forEach((line, idx) => {
+      const parts = line.split('\t');
+      if (parts.length >= 2) {
+        quizletCards.push({
+          id: `c-qz-${idx}-${Date.now()}`,
+          front: parts[0].trim(),
+          back: parts.slice(1).join('\n').trim(),
+          hint: '',
+          isStarred: false,
+          createdAt: Date.now(),
+        });
+      }
+    });
+
+    if (quizletCards.length > 0) {
+      return {
+        title: (fileName || 'Bộ thẻ từ vựng').replace(/\.[^/.]+$/, '').replace(/[_\\-]/g, ' '),
+        totalFound: quizletCards.length,
+        cards: quizletCards,
+        hasAnswers: true,
+        missingAnswerCount: 0,
+        formatType: 'quizlet',
+      };
+    }
+  }
 
   const cards: Card[] = [];
   let missingCount = 0;
@@ -224,42 +297,43 @@ export function parseTextExam(
     }
 
     // Extract Question Number (e.g. Câu 1 -> 1)
-    const qNumMatch = chunk.match(/^(?:câu|bài|question)?\s*(\d+)[:.]/i);
+    const qNumMatch = chunk.match(/^(?:câu|bài|question|câu\s*hỏi)?\s*(\d+)[\s:.-]/i);
     const qNum = qNumMatch ? parseInt(qNumMatch[1], 10) : index + 1;
 
     // Remove the leading "Câu 1:" prefix from question prompt
-    let body = chunk.replace(/^(?:câu|bài|question)?\s*\d+[:.]\s*/i, '').trim();
+    let body = chunk.replace(/^(?:câu|bài|question|câu\s*hỏi)?\s*\d+[\s:.-]\s*/i, '').trim();
+    if (!body) body = chunk;
 
-    // Look for inline answer notation: "Đáp án: A", "Đ/A: B", "Answer: C", "Key: D", "ĐA: A"
+    // Look for inline answer notation: "Đáp án: A", "Đ/A: B", "Answer: C", "Key: D", "ĐA: A", "Đáp án đúng: A"
     let correctLetter = '';
-    const inlineAnsMatch = body.match(/(?:đáp\s*án|đ\/a|answer|key|đa)[:\s]*([A-D])/i);
+    const inlineAnsMatch = body.match(/(?:đáp\s*án\s*đúng|đáp\s*án|đ\/a|answer|key|đa)[:\s]*([A-D])/i);
     if (inlineAnsMatch) {
       correctLetter = inlineAnsMatch[1].toUpperCase();
-      // Remove inline answer line from body so it doesn't clutter front
-      body = body.replace(/(?:đáp\s*án|đ\/a|answer|key|đa)[:\s]*[A-D][^\n]*/i, '').trim();
+      body = body.replace(/(?:đáp\s*án\s*đúng|đáp\s*án|đ\/a|answer|key|đa)[:\s]*[A-D][^\n]*/i, '').trim();
     }
 
-    // If no inline answer found, check the extracted answer table sheet!
+    // If no inline answer found, check the extracted answer table sheet
     if (!correctLetter && answerSheetMap.has(qNum)) {
       correctLetter = answerSheetMap.get(qNum)!;
     }
 
-    // Look for options A, B, C, D
-    // Handles options on newlines OR options on same line (e.g. "A. abc   B. def   C. ghi   D. jkl")
-    const optRegex = /(?:^|\s|\n)([A-D])[\.\)]\s*([\s\S]*?)(?=(?:(?:^|\s|\n)[A-D][\.\)])|$)/g;
-    const foundOptions: { letter: string; text: string }[] = [];
+    // Check for marked answer in options (e.g. "*A. ...", "(A). ...", or "[x] A")
+    if (!correctLetter) {
+      if (body.includes('*A') || body.includes('(A)') || body.includes('[A]') || body.includes('A (đúng)')) correctLetter = 'A';
+      else if (body.includes('*B') || body.includes('(B)') || body.includes('[B]') || body.includes('B (đúng)')) correctLetter = 'B';
+      else if (body.includes('*C') || body.includes('(C)') || body.includes('[C]') || body.includes('C (đúng)')) correctLetter = 'C';
+      else if (body.includes('*D') || body.includes('(D)') || body.includes('[D]') || body.includes('D (đúng)')) correctLetter = 'D';
+    }
 
-    // Check if options are present
-    const optMatches = [...body.matchAll(/(?:^|\n|\s{2,})([A-D])[\.\)]\s*([^\n]+)/g)];
-
-    let questionPrompt = body;
+    // Extract options A, B, C, D
     let optA = '';
     let optB = '';
     let optC = '';
     let optD = '';
+    let questionPrompt = body;
 
+    const optMatches = [...body.matchAll(/(?:^|\n|\s{2,})([A-D])[\.\)]\s*([^\n]+)/g)];
     if (optMatches.length >= 2) {
-      // Find where options start
       const firstOptIndex = body.search(/(?:^|\n|\s{2,})[A-D][\.\)]/);
       if (firstOptIndex !== -1) {
         questionPrompt = body.slice(0, firstOptIndex).trim();
@@ -274,27 +348,19 @@ export function parseTextExam(
         else if (letter === 'D') optD = text;
       });
     } else {
-      // Fallback: line-by-line inspection
+      // Line-by-line fallback
       const lines = body.split('\n').map((l) => l.trim()).filter(Boolean);
       const qLines: string[] = [];
       lines.forEach((l) => {
-        if (/^A[\.\)]\s*/i.test(l)) optA = l.replace(/^A[\.\)]\s*/i, '');
-        else if (/^B[\.\)]\s*/i.test(l)) optB = l.replace(/^B[\.\)]\s*/i, '');
-        else if (/^C[\.\)]\s*/i.test(l)) optC = l.replace(/^C[\.\)]\s*/i, '');
-        else if (/^D[\.\)]\s*/i.test(l)) optD = l.replace(/^D[\.\)]\s*/i, '');
+        if (/^A[\.\)]\s*/i.test(l)) optA = l.replace(/^A[\.\)]\s*/i, '').trim();
+        else if (/^B[\.\)]\s*/i.test(l)) optB = l.replace(/^B[\.\)]\s*/i, '').trim();
+        else if (/^C[\.\)]\s*/i.test(l)) optC = l.replace(/^C[\.\)]\s*/i, '').trim();
+        else if (/^D[\.\)]\s*/i.test(l)) optD = l.replace(/^D[\.\)]\s*/i, '').trim();
         else if (!optA && !optB && !optC && !optD) qLines.push(l);
       });
       if (qLines.length > 0) {
         questionPrompt = qLines.join(' ');
       }
-    }
-
-    // Check for marked answer in options (e.g. "*A. ...", "(A). ...", or "[x] A")
-    if (!correctLetter) {
-      if (body.includes('*A') || body.includes('(A)') || body.includes('A (đúng)')) correctLetter = 'A';
-      else if (body.includes('*B') || body.includes('(B)') || body.includes('B (đúng)')) correctLetter = 'B';
-      else if (body.includes('*C') || body.includes('(C)') || body.includes('C (đúng)')) correctLetter = 'C';
-      else if (body.includes('*D') || body.includes('(D)') || body.includes('D (đúng)')) correctLetter = 'D';
     }
 
     const options = [optA, optB, optC, optD].filter(Boolean);
@@ -306,32 +372,33 @@ export function parseTextExam(
     else if (correctLetter === 'C') correctIndex = 2;
     else if (correctLetter === 'D') correctIndex = 3;
 
-    const isMissing = correctIndex === -1;
+    const isMissing = correctIndex === -1 && options.length >= 2;
     if (isMissing) {
       missingCount += 1;
-      correctIndex = 0; // Default until AI or user confirms
+      correctIndex = 0;
       correctLetter = 'A';
     }
 
-    const correctContent = options[correctIndex] || optA || '';
+    let front = '';
+    let back = '';
 
-    // Requirement:
-    // "1 mặt là câu hỏi và 4 đáp án, 1 mặt là đáp án đúng"
-    const front = `Câu ${qNum}: ${questionPrompt}${
-      options.length > 0
-        ? `\n\nA. ${optA || '...'}\nB. ${optB || '...'}\nC. ${optC || '...'}\nD. ${optD || '...'}`
-        : ''
-    }`;
-
-    const back = `Đáp án đúng: ${correctLetter}. ${correctContent}`;
+    if (options.length >= 2) {
+      const correctContent = options[correctIndex] || optA || '';
+      front = `Câu ${qNum}: ${questionPrompt || 'Nội dung câu hỏi'}\n\nA. ${optA || '...'}\nB. ${optB || '...'}\nC. ${optC || '...'}\nD. ${optD || '...'}`;
+      back = `Đáp án đúng: ${correctLetter || 'A'}. ${correctContent}`;
+    } else {
+      // Simple Q&A card
+      front = questionPrompt || `Câu hỏi ${qNum}`;
+      back = correctLetter ? `Đáp án: ${correctLetter}` : 'Xem chi tiết câu hỏi';
+    }
 
     cards.push({
       id: `c-txt-${index}-${Date.now()}`,
-      front,
-      back,
-      hint: `Đáp án bắt đầu bằng chữ cái ${correctLetter}`,
+      front: front || 'Câu hỏi',
+      back: back || 'Đáp án',
+      hint: correctLetter ? `Đáp án là phương án ${correctLetter}` : '',
       options: options.length >= 2 ? [optA, optB, optC, optD] : undefined,
-      correctIndex,
+      correctIndex: correctIndex >= 0 ? correctIndex : 0,
       explanation: isMissing ? 'AI gợi ý - cần kiểm tra' : undefined,
       isAiSuggested: isMissing,
       isStarred: false,
@@ -344,7 +411,7 @@ export function parseTextExam(
     .replace(/[_\\-]/g, ' ');
 
   return {
-    title,
+    title: title || 'Bộ đề thi trắc nghiệm',
     totalFound: cards.length,
     cards,
     hasAnswers: missingCount < cards.length,

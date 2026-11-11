@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   X,
   Sparkles,
@@ -31,6 +31,9 @@ interface AiCreateModalProps {
   onClose: () => void;
   onSaveSet: (newSet: StudySet) => void;
   lang: Language;
+  initialText?: string;
+  initialTab?: 'file' | 'text' | 'quizlet';
+  autoGenerate?: boolean;
 }
 
 const SAMPLE_INPUTS = {
@@ -93,6 +96,9 @@ export const AiCreateModal: React.FC<AiCreateModalProps> = ({
   onClose,
   onSaveSet,
   lang,
+  initialText = '',
+  initialTab = 'file',
+  autoGenerate = false,
 }) => {
   const t = translations[lang];
 
@@ -120,15 +126,38 @@ export const AiCreateModal: React.FC<AiCreateModalProps> = ({
   const [filterMissingOnly, setFilterMissingOnly] = useState(false);
   const PAGE_SIZE = 15;
 
-  if (!isOpen) return null;
+  // React to initialText or initialTab changes
+  useEffect(() => {
+    if (isOpen) {
+      if (initialText && initialText.trim().length > 0) {
+        setInputText(initialText);
+        setActiveTab('text');
+        if (autoGenerate) {
+          handleGenerateWithText(initialText);
+        }
+      } else {
+        setActiveTab(initialTab || 'file');
+      }
+    } else {
+      // Reset when modal closes
+      setPreviewStage(false);
+      setErrorMsg(null);
+      setIsLoading(false);
+      setPreviewCards([]);
+    }
+  }, [isOpen, initialText, initialTab, autoGenerate]);
 
-  // Filtered cards for preview
+  // Filtered cards for preview - DEFENSIVE CHECK to prevent blank screen crashes
   const filteredPreviewCards = useMemo(() => {
+    if (!previewCards || !Array.isArray(previewCards)) return [];
     return previewCards.filter((card) => {
+      if (!card) return false;
       if (filterMissingOnly && !card.isAiSuggested) return false;
       if (!previewSearch.trim()) return true;
       const q = previewSearch.toLowerCase();
-      return card.front.toLowerCase().includes(q) || card.back.toLowerCase().includes(q);
+      const frontStr = (card.front || '').toLowerCase();
+      const backStr = (card.back || '').toLowerCase();
+      return frontStr.includes(q) || backStr.includes(q);
     });
   }, [previewCards, filterMissingOnly, previewSearch]);
 
@@ -140,7 +169,8 @@ export const AiCreateModal: React.FC<AiCreateModalProps> = ({
 
   // Missing answer count
   const missingCount = useMemo(() => {
-    return previewCards.filter((c) => c.isAiSuggested).length;
+    if (!previewCards || !Array.isArray(previewCards)) return 0;
+    return previewCards.filter((c) => c && c.isAiSuggested).length;
   }, [previewCards]);
 
   // Handle direct file upload
@@ -156,93 +186,78 @@ export const AiCreateModal: React.FC<AiCreateModalProps> = ({
     setUploadedFileName(file.name);
 
     try {
-      const extension = file.name.split('.').pop()?.toLowerCase();
+      const extension = (file.name.split('.').pop() || '').toLowerCase();
       let parseResult: ParsedExamResult | null = null;
 
-      if (extension === 'xlsx' || extension === 'xls' || extension === 'csv') {
-        const buffer = await file.arrayBuffer();
-        parseResult = await parseExcelExam(buffer, file.name);
-      } else if (extension === 'docx' || extension === 'doc') {
-        const buffer = await file.arrayBuffer();
-        parseResult = await parseDocxExam(buffer, file.name);
-      } else if (extension === 'pdf') {
-        // PDF parser via server-side Gemini multimodal
-        setLoadingStatus(
-          lang === 'vi'
-            ? 'Đang đọc và bóc tách câu hỏi từ tệp PDF...'
-            : 'Reading and parsing PDF questions...'
-        );
+      // 1. Try robust backend parser /api/parse-exam-file
+      try {
         const reader = new FileReader();
         const base64Promise = new Promise<string>((resolve, reject) => {
           reader.onload = () => {
             const result = reader.result as string;
-            const base64 = result.split(',')[1];
+            const base64 = result.split(',')[1] || '';
             resolve(base64);
           };
           reader.onerror = reject;
           reader.readAsDataURL(file);
         });
 
-        const base64 = await base64Promise;
-        const res = await fetch('/api/ai/parse-pdf', {
+        const fileBase64 = await base64Promise;
+        const res = await fetch('/api/parse-exam-file', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pdfBase64: base64, fileName: file.name }),
+          body: JSON.stringify({ fileBase64, fileName: file.name, fileExt: extension }),
         });
-        const data = await res.json();
-        if (!res.ok || data.error) {
-          throw new Error(data.error || 'Lỗi khi đọc file PDF.');
+
+        if (res.ok) {
+          const serverData = await res.json();
+          if (serverData.cards && Array.isArray(serverData.cards) && serverData.cards.length > 0) {
+            parseResult = {
+              title: serverData.title || file.name.replace(/\.[^/.]+$/, ''),
+              totalFound: serverData.cards.length,
+              cards: serverData.cards,
+              hasAnswers: true,
+              missingAnswerCount: serverData.cards.filter((c: any) => c.isAiSuggested).length,
+              formatType: 'excel',
+            };
+          } else if (serverData.rawText) {
+            parseResult = parseTextExam(serverData.rawText, file.name, extension === 'docx' ? 'docx' : 'txt_regex');
+          }
         }
-
-        const cards: Card[] = (data.questions || []).map((q: any, idx: number) => {
-          const optA = q.options?.[0] || '';
-          const optB = q.options?.[1] || '';
-          const optC = q.options?.[2] || '';
-          const optD = q.options?.[3] || '';
-          return {
-            id: `c-pdf-${idx}-${Date.now()}`,
-            front: `${q.question}\n\nA. ${optA}\nB. ${optB}\nC. ${optC}\nD. ${optD}`,
-            back: `Đáp án đúng: ${q.correctLetter || 'A'}. ${q.options?.[q.correctIndex || 0] || optA}`,
-            hint: q.explanation || '',
-            options: [optA, optB, optC, optD],
-            correctIndex: q.correctIndex ?? 0,
-            explanation: q.explanation || '',
-            isAiSuggested: false,
-            isStarred: false,
-            createdAt: Date.now(),
-          };
-        });
-
-        parseResult = {
-          title: data.title || file.name.replace(/\.[^/.]+$/, ''),
-          totalFound: cards.length,
-          cards,
-          hasAnswers: true,
-          missingAnswerCount: 0,
-          formatType: 'txt_regex',
-        };
-      } else {
-        // Plain text, markdown, json
-        const text = await file.text();
-        parseResult = parseTextExam(text, file.name, 'txt_regex');
+      } catch (serverErr) {
+        console.warn('Server parse failed, falling back to client parser:', serverErr);
       }
 
-      if (parseResult && parseResult.cards.length > 0) {
-        setGeneratedTitle(parseResult.title);
+      // 2. Client-side fallback if server didn't produce cards
+      if (!parseResult || !parseResult.cards || parseResult.cards.length === 0) {
+        if (extension === 'xlsx' || extension === 'xls' || extension === 'csv') {
+          const buffer = await file.arrayBuffer();
+          parseResult = await parseExcelExam(buffer, file.name);
+        } else if (extension === 'docx' || extension === 'doc') {
+          const buffer = await file.arrayBuffer();
+          parseResult = await parseDocxExam(buffer, file.name);
+        } else {
+          const text = await file.text();
+          parseResult = parseTextExam(text, file.name, 'txt_regex');
+        }
+      }
+
+      if (parseResult && parseResult.cards && parseResult.cards.length > 0) {
+        setGeneratedTitle(parseResult.title || file.name.replace(/\.[^/.]+$/, ''));
         setGeneratedDesc(
           lang === 'vi'
             ? `Bộ câu hỏi trích xuất từ tệp ${file.name} gồm ${parseResult.totalFound} câu hỏi trắc nghiệm.`
             : `Extracted from ${file.name} with ${parseResult.totalFound} questions.`
         );
         setGeneratedSubject('Ôn thi trắc nghiệm');
-        setGeneratedTags(['Đề thi', 'Trắc nghiệm', extension?.toUpperCase() || 'File']);
+        setGeneratedTags(['Đề thi', 'Trắc nghiệm', extension.toUpperCase()]);
         setPreviewCards(parseResult.cards);
         setPreviewStage(true);
         setPreviewPage(1);
       } else {
         throw new Error(
           lang === 'vi'
-            ? 'Không tìm thấy câu hỏi trắc nghiệm nào trong tệp. Vui lòng kiểm tra lại cấu trúc file (cần có Câu 1..., A, B, C, D).'
+            ? 'Không tìm thấy câu hỏi trắc nghiệm nào trong tệp. Hãy kiểm tra nội dung hoặc dán trực tiếp đề thi vào mục "Dán đề thi".'
             : 'No questions found in this file.'
         );
       }
@@ -251,8 +266,8 @@ export const AiCreateModal: React.FC<AiCreateModalProps> = ({
       setErrorMsg(
         err.message ||
           (lang === 'vi'
-            ? 'Không thể đọc tệp này. Vui lòng thử tệp khác hoặc dán trực tiếp văn bản.'
-            : 'Could not parse file. Please try pasting text.')
+            ? 'Không thể đọc tệp này. Bạn có thể mở tệp, sao chép toàn bộ (Ctrl+A, Ctrl+C) và dán vào tab "Dán đề thi".'
+            : 'Could not read file. Please try pasting text.')
       );
     } finally {
       setIsLoading(false);
@@ -264,7 +279,7 @@ export const AiCreateModal: React.FC<AiCreateModalProps> = ({
   const handleSolveMissingAnswersWithAi = async () => {
     const missingIndices: number[] = [];
     previewCards.forEach((c, idx) => {
-      if (c.isAiSuggested) missingIndices.push(idx);
+      if (c && c.isAiSuggested) missingIndices.push(idx);
     });
 
     if (missingIndices.length === 0) return;
@@ -303,28 +318,30 @@ export const AiCreateModal: React.FC<AiCreateModalProps> = ({
           body: JSON.stringify({ questions: batchQuestions }),
         });
 
-        const data = await res.json();
-        if (data.results && Array.isArray(data.results)) {
-          data.results.forEach((solved: any) => {
-            const cardIdx = updatedCards.findIndex((c) => c.id === solved.id);
-            if (cardIdx !== -1) {
-              const cur = updatedCards[cardIdx];
-              const opts = cur.options || [];
-              const correctLetter = solved.correctLetter || 'A';
-              const correctIdx = solved.correctIndex ?? 0;
-              const ansContent = opts[correctIdx] || '';
+        if (res.ok) {
+          const data = await res.json();
+          if (data.results && Array.isArray(data.results)) {
+            data.results.forEach((solved: any) => {
+              const cardIdx = updatedCards.findIndex((c) => c.id === solved.id);
+              if (cardIdx !== -1) {
+                const cur = updatedCards[cardIdx];
+                const opts = cur.options || [];
+                const correctLetter = solved.correctLetter || 'A';
+                const correctIdx = solved.correctIndex ?? 0;
+                const ansContent = opts[correctIdx] || '';
 
-              updatedCards[cardIdx] = {
-                ...cur,
-                back: `Đáp án đúng: ${correctLetter}. ${ansContent}${
-                  solved.explanation ? `\n\n💡 Giải thích: ${solved.explanation}` : ''
-                }`,
-                correctIndex: correctIdx,
-                explanation: solved.explanation || '',
-                isAiSuggested: false,
-              };
-            }
-          });
+                updatedCards[cardIdx] = {
+                  ...cur,
+                  back: `Đáp án đúng: ${correctLetter}. ${ansContent}${
+                    solved.explanation ? `\n\n💡 Giải thích: ${solved.explanation}` : ''
+                  }`,
+                  correctIndex: correctIdx,
+                  explanation: solved.explanation || '',
+                  isAiSuggested: false,
+                };
+              }
+            });
+          }
         }
       }
 
@@ -338,9 +355,10 @@ export const AiCreateModal: React.FC<AiCreateModalProps> = ({
     }
   };
 
-  // Generate cards from text input (with regex first, then AI fallback)
-  const handleGenerate = async () => {
-    if (!inputText.trim()) {
+  // Generate cards from text with instant deterministic parser & fallback
+  const handleGenerateWithText = async (textToUse: string) => {
+    const text = (textToUse || '').trim();
+    if (!text) {
       setErrorMsg(
         lang === 'vi'
           ? 'Vui lòng dán câu hỏi hoặc nội dung tài liệu trước khi tạo thẻ.'
@@ -351,50 +369,47 @@ export const AiCreateModal: React.FC<AiCreateModalProps> = ({
 
     setIsLoading(true);
     setErrorMsg(null);
-    setLoadingStatus(lang === 'vi' ? 'Đang phân tích và nhận diện cấu trúc đề thi...' : 'Analyzing exam format...');
+    setLoadingStatus(lang === 'vi' ? 'Đang phân tích và bóc tách câu hỏi...' : 'Analyzing exam format...');
 
-    // First attempt: Check if deterministic parser finds multiple questions (handles 200-300 questions instantly!)
-    const directParsed = parseTextExam(inputText, 'Bộ đề trắc nghiệm', 'txt_regex');
-    if (directParsed.cards.length >= 3) {
-      setGeneratedTitle(directParsed.title);
-      setGeneratedDesc(
-        lang === 'vi'
-          ? `Đã nhận diện thành công ${directParsed.totalFound} câu hỏi trắc nghiệm từ văn bản dán vào.`
-          : `Extracted ${directParsed.totalFound} questions from pasted text.`
-      );
-      setGeneratedSubject('Ôn thi');
-      setGeneratedTags(['Trắc nghiệm', 'Flashcard']);
-      setPreviewCards(directParsed.cards);
-      setPreviewStage(true);
-      setPreviewPage(1);
-      setIsLoading(false);
-      return;
-    }
-
-    // Otherwise, call AI for unstructured text/document
     try {
+      // 1. High-speed universal parser (handles 1 to 300+ questions in milliseconds)
+      const directParsed = parseTextExam(text, 'Bộ đề trắc nghiệm', 'txt_regex');
+      if (directParsed.cards && directParsed.cards.length >= 1) {
+        setGeneratedTitle(directParsed.title || (lang === 'vi' ? 'Bộ đề trắc nghiệm' : 'Exam Set'));
+        setGeneratedDesc(
+          lang === 'vi'
+            ? `Đã nhận diện thành công ${directParsed.totalFound} câu hỏi từ văn bản dán vào.`
+            : `Extracted ${directParsed.totalFound} questions from pasted text.`
+        );
+        setGeneratedSubject('Ôn thi');
+        setGeneratedTags(['Trắc nghiệm', 'Flashcard']);
+        setPreviewCards(directParsed.cards);
+        setPreviewStage(true);
+        setPreviewPage(1);
+        setIsLoading(false);
+        return;
+      }
+
+      // 2. AI Generator fallback for unstructured text
       const res = await fetch('/api/ai/generate-cards', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          text: inputText,
-          mode: activeTab === 'text' ? 'raw_text' : 'document',
+          text,
+          mode: 'raw_text',
           targetCount,
           language: lang,
         }),
       });
 
-      const data = await res.json();
-      if (!res.ok || data.error) {
-        throw new Error(data.error || 'Lỗi server khi tạo thẻ.');
-      }
-
-      setGeneratedTitle(data.title || (lang === 'vi' ? 'Bộ thẻ mới' : 'New Flashcard Set'));
-      setGeneratedDesc(data.description || '');
-      setGeneratedSubject(data.subject || (lang === 'vi' ? 'Kiến thức chung' : 'General'));
-      setGeneratedTags(data.tags || []);
-      setPreviewCards(
-        (data.cards || []).map((c: any, idx: number) => {
+      if (res.ok) {
+        const data = await res.json();
+        setGeneratedTitle(data.title || (lang === 'vi' ? 'Bộ thẻ mới' : 'New Flashcard Set'));
+        setGeneratedDesc(data.description || '');
+        setGeneratedSubject(data.subject || (lang === 'vi' ? 'Kiến thức chung' : 'General'));
+        setGeneratedTags(data.tags || []);
+        
+        const generatedCards: Card[] = (data.cards || []).map((c: any, idx: number) => {
           const optA = c.options?.[0] || '';
           const optB = c.options?.[1] || '';
           const optC = c.options?.[2] || '';
@@ -402,16 +417,15 @@ export const AiCreateModal: React.FC<AiCreateModalProps> = ({
           const correctIdx = c.correctIndex ?? 0;
           const letter = String.fromCharCode(65 + correctIdx);
 
-          // Format front and back
           const front =
             c.options && c.options.length >= 2
-              ? `${c.front}\n\nA. ${optA}\nB. ${optB}\nC. ${optC}\nD. ${optD}`
-              : c.front;
+              ? `${c.front || 'Câu hỏi'}\n\nA. ${optA}\nB. ${optB}\nC. ${optC}\nD. ${optD}`
+              : (c.front || 'Câu hỏi');
 
           const back =
             c.options && c.options.length >= 2
-              ? `Đáp án đúng: ${letter}. ${c.options[correctIdx] || c.back}`
-              : c.back;
+              ? `Đáp án đúng: ${letter}. ${c.options[correctIdx] || c.back || ''}`
+              : (c.back || 'Đáp án');
 
           return {
             id: `c-${Date.now()}-${idx}-${Math.random().toString(36).substr(2, 4)}`,
@@ -425,18 +439,45 @@ export const AiCreateModal: React.FC<AiCreateModalProps> = ({
             isStarred: false,
             createdAt: Date.now(),
           };
-        })
-      );
+        });
 
-      setPreviewStage(true);
-      setPreviewPage(1);
+        if (generatedCards.length > 0) {
+          setPreviewCards(generatedCards);
+          setPreviewStage(true);
+          setPreviewPage(1);
+          return;
+        }
+      }
+
+      // 3. Last fallback: Split lines into simple cards
+      const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+      const fallbackCards: Card[] = [];
+      for (let i = 0; i < lines.length; i += 2) {
+        fallbackCards.push({
+          id: `c-fallback-${i}-${Date.now()}`,
+          front: lines[i] || `Câu hỏi ${Math.floor(i / 2) + 1}`,
+          back: lines[i + 1] || 'Xem chi tiết',
+          hint: '',
+          isStarred: false,
+          createdAt: Date.now(),
+        });
+      }
+
+      if (fallbackCards.length > 0) {
+        setGeneratedTitle(lang === 'vi' ? 'Bộ thẻ vừa tạo' : 'New Set');
+        setPreviewCards(fallbackCards);
+        setPreviewStage(true);
+        setPreviewPage(1);
+      } else {
+        throw new Error(lang === 'vi' ? 'Vui lòng nhập nội dung có ít nhất 1 câu hỏi.' : 'Please enter valid text.');
+      }
     } catch (err: any) {
       console.error(err);
       setErrorMsg(
         err.message ||
           (lang === 'vi'
-            ? 'Không thể tạo thẻ từ nội dung này. Vui lòng kiểm tra lại kết nối và thử lại.'
-            : 'Could not generate cards. Please check connection and try again.')
+            ? 'Không thể tạo thẻ từ nội dung này. Vui lòng kiểm tra lại văn bản dán vào.'
+            : 'Could not generate cards. Please check your pasted text.')
       );
     } finally {
       setIsLoading(false);
@@ -444,15 +485,19 @@ export const AiCreateModal: React.FC<AiCreateModalProps> = ({
     }
   };
 
+  const handleGenerate = () => {
+    handleGenerateWithText(inputText);
+  };
+
   const handleSaveToLibrary = () => {
     if (!generatedTitle.trim()) return;
 
-    const finalCards: Card[] = previewCards
-      .filter((c) => (c.front || '').trim() && (c.back || '').trim())
+    const finalCards: Card[] = (previewCards || [])
+      .filter((c) => c && (c.front || '').trim() && (c.back || '').trim())
       .map((c) => ({
         id: c.id || `c-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-        front: c.front.trim(),
-        back: c.back.trim(),
+        front: (c.front || '').trim(),
+        back: (c.back || '').trim(),
         hint: c.hint || '',
         options: c.options || [],
         correctIndex: c.correctIndex ?? 0,
@@ -469,10 +514,10 @@ export const AiCreateModal: React.FC<AiCreateModalProps> = ({
 
     const newSet: StudySet = {
       id: `set-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-      title: generatedTitle,
-      description: generatedDesc,
-      subject: generatedSubject,
-      tags: generatedTags,
+      title: generatedTitle || 'Bộ thẻ mới',
+      description: generatedDesc || '',
+      subject: generatedSubject || 'Kiến thức chung',
+      tags: generatedTags && generatedTags.length > 0 ? generatedTags : ['Đề thi'],
       isPublic: true,
       cards: finalCards,
       createdAt: Date.now(),
@@ -506,6 +551,8 @@ export const AiCreateModal: React.FC<AiCreateModalProps> = ({
     setPreviewCards((prev) => [newCard, ...prev]);
   };
 
+  if (!isOpen) return null;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
       <div className="bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 w-full max-w-5xl max-h-[94vh] flex flex-col overflow-hidden">
@@ -517,7 +564,7 @@ export const AiCreateModal: React.FC<AiCreateModalProps> = ({
             </div>
             <div>
               <h3 className="font-black text-lg sm:text-xl text-slate-900 dark:text-white flex items-center gap-2">
-                {previewStage ? t.previewTitle : lang === 'vi' ? 'Tự Động Tạo Quiz Từ Tệp & Đề Thi' : 'Create Quiz from File'}
+                {previewStage ? (lang === 'vi' ? 'Xem Trước & Lưu Bộ Thẻ' : 'Preview & Save') : (lang === 'vi' ? 'Tự Động Tạo Quiz Từ Tệp & Đề Thi' : 'Create Quiz from File')}
                 <span className="text-xs font-extrabold px-2.5 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300">
                   {lang === 'vi' ? 'Hỗ trợ 200 - 300 câu' : 'Supports 200-300 Qs'}
                 </span>
@@ -691,12 +738,12 @@ export const AiCreateModal: React.FC<AiCreateModalProps> = ({
 
                   <div className="space-y-2">
                     <textarea
-                      rows={10}
+                      rows={12}
                       value={inputText}
                       onChange={(e) => setInputText(e.target.value)}
                       placeholder={
                         lang === 'vi'
-                          ? `Dán toàn bộ đề thi vào đây (có thể lên tới 200 - 300 câu). Ví dụ:
+                          ? `Dán toàn bộ đề thi vào đây (hỗ trợ từ 1 câu đến 200 - 300 câu). Ví dụ:
 Câu 1: Thủ đô nước ta là gì?
 A. TP HCM
 B. Hà Nội
@@ -704,11 +751,11 @@ C. Đà Nẵng
 D. Cần Thơ
 Đáp án: B
 
-Hoặc để bảng đáp án ở cuối đề:
+Hoặc có bảng đáp án ở cuối đề:
 1.B  2.C  3.A  4.D ...`
                           : 'Paste exam questions here...'
                       }
-                      className="w-full p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-xs sm:text-sm text-slate-900 dark:text-slate-100 outline-none focus:border-indigo-500 font-mono resize-none"
+                      className="w-full p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-xs sm:text-sm text-slate-900 dark:text-slate-100 outline-none focus:border-indigo-500 font-mono resize-y"
                     />
                     <div className="flex items-center justify-between text-xs text-slate-400">
                       <span>{inputText.length} ký tự</span>
@@ -719,10 +766,10 @@ Hoặc để bảng đáp án ở cuối đề:
                   <button
                     onClick={handleGenerate}
                     disabled={isLoading || !inputText.trim()}
-                    className="w-full py-4 rounded-2xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 text-white font-extrabold text-sm shadow-xl shadow-indigo-500/25 transition disabled:opacity-40 flex items-center justify-center gap-2 active:scale-98"
+                    className="w-full py-4 rounded-2xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 text-white font-extrabold text-sm shadow-xl shadow-indigo-500/25 transition disabled:opacity-40 flex items-center justify-center gap-2 active:scale-98 cursor-pointer"
                   >
                     <Sparkles className="w-5 h-5" />
-                    <span>{lang === 'vi' ? 'Bóc Tách & Tạo Bộ Flashcard' : 'Parse & Generate Set'}</span>
+                    <span>{lang === 'vi' ? 'Bóc Tách & Tạo Bộ Flashcard Ngay' : 'Parse & Generate Set'}</span>
                   </button>
                 </div>
               )}
@@ -853,11 +900,12 @@ Hoặc để bảng đáp án ở cuối đề:
               {/* Cards List Display (Paginated for high speed) */}
               <div className="space-y-4">
                 {displayedCards.map((card, idx) => {
+                  if (!card) return null;
                   const actualIndex = (previewPage - 1) * PAGE_SIZE + idx;
 
                   return (
                     <div
-                      key={card.id}
+                      key={card.id || `card-${actualIndex}`}
                       className="p-5 rounded-2xl bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 shadow-sm space-y-3"
                     >
                       <div className="flex items-center justify-between">
@@ -895,7 +943,7 @@ Hoặc để bảng đáp án ở cuối đề:
                           </label>
                           <textarea
                             rows={5}
-                            value={card.front}
+                            value={card.front || ''}
                             onChange={(e) => updateCardField(card.id, 'front', e.target.value)}
                             className="w-full p-3 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-900 dark:text-white outline-none focus:border-indigo-500 resize-none font-sans leading-relaxed"
                           />
@@ -908,7 +956,7 @@ Hoặc để bảng đáp án ở cuối đề:
                           </label>
                           <textarea
                             rows={5}
-                            value={card.back}
+                            value={card.back || ''}
                             onChange={(e) => updateCardField(card.id, 'back', e.target.value)}
                             className="w-full p-3 rounded-xl bg-emerald-50/40 dark:bg-emerald-950/20 border-2 border-emerald-200 dark:border-emerald-800 text-xs font-bold text-emerald-900 dark:text-emerald-200 outline-none focus:border-emerald-500 resize-none font-sans leading-relaxed"
                           />
@@ -960,7 +1008,7 @@ Hoặc để bảng đáp án ở cuối đề:
               <button
                 type="button"
                 onClick={handleSaveToLibrary}
-                className="flex items-center gap-2 px-7 py-3 rounded-2xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 text-white font-black text-xs sm:text-sm shadow-xl shadow-indigo-500/25 transition active:scale-95"
+                className="flex items-center gap-2 px-7 py-3 rounded-2xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 text-white font-black text-xs sm:text-sm shadow-xl shadow-indigo-500/25 transition active:scale-95 cursor-pointer"
               >
                 <CheckCircle2 className="w-5 h-5" />
                 <span>{lang === 'vi' ? `Lưu Bộ Thẻ (${previewCards.length} câu)` : `Save Set (${previewCards.length} Qs)`}</span>

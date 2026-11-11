@@ -4,6 +4,8 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
+import mammoth from 'mammoth';
+import * as XLSX from 'xlsx';
 
 dotenv.config();
 
@@ -13,7 +15,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-app.use(express.json({ limit: '25mb' }));
+app.use(express.json({ limit: '50mb' }));
 
 // Persistent User Data Storage (Linked with Google Account)
 const DATA_DIR = path.resolve(__dirname, 'data', 'users');
@@ -472,6 +474,183 @@ Trích xuất tối đa và đầy đủ không bỏ sót câu nào.`,
   } catch (error: any) {
     console.error('Error parsing PDF:', error);
     return res.status(500).json({ error: error.message || 'Lỗi khi đọc file PDF.' });
+  }
+});
+
+// 9. Universal Server-side Exam File Parser (Word docx, Excel xlsx, PDF, CSV, TXT)
+app.post('/api/parse-exam-file', async (req: Request, res: Response) => {
+  try {
+    const { fileBase64, fileName = 'de_thi', fileExt } = req.body;
+    if (!fileBase64) {
+      return res.status(400).json({ error: 'Thiếu dữ liệu tệp tải lên.' });
+    }
+
+    const buffer = Buffer.from(fileBase64, 'base64');
+    const ext = (fileExt || fileName.split('.').pop() || '').toLowerCase();
+    let rawText = '';
+
+    if (ext === 'docx' || ext === 'doc') {
+      try {
+        const docResult = await mammoth.extractRawText({ buffer });
+        rawText = docResult.value || '';
+      } catch (err: any) {
+        console.error('Mammoth extract error on server:', err);
+        return res.status(400).json({ error: 'Không thể giải mã tệp Word (.docx). Vui lòng thử lưu lại tệp.' });
+      }
+    } else if (ext === 'xlsx' || ext === 'xls' || ext === 'csv') {
+      const workbook = XLSX.read(buffer, { type: 'buffer' });
+      const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows: any[][] = XLSX.utils.sheet_to_json(firstSheet, { header: 1 });
+
+      const cards: any[] = [];
+      let startRowIdx = 0;
+      let qCol = 0, aCol = 1, bCol = 2, cCol = 3, dCol = 4, ansCol = 5;
+
+      // Auto-detect columns
+      for (let r = 0; r < Math.min(3, rows.length); r++) {
+        const row = rows[r];
+        if (!Array.isArray(row)) continue;
+        row.forEach((cell, idx) => {
+          const v = String(cell || '').toLowerCase().trim();
+          if (v.includes('câu hỏi') || v.includes('nội dung') || v.includes('question')) {
+            qCol = idx;
+            startRowIdx = r + 1;
+          } else if (v === 'a' || v.includes('đáp án a')) aCol = idx;
+          else if (v === 'b' || v.includes('đáp án b')) bCol = idx;
+          else if (v === 'c' || v.includes('đáp án c')) cCol = idx;
+          else if (v === 'd' || v.includes('đáp án d')) dCol = idx;
+          else if (v.includes('đáp án') || v.includes('answer')) ansCol = idx;
+        });
+      }
+
+      for (let i = startRowIdx; i < rows.length; i++) {
+        const row = rows[i];
+        if (!row || !row[qCol]) continue;
+        const qText = String(row[qCol] || '').trim();
+        const optA = String(row[aCol] || '').trim();
+        const optB = String(row[bCol] || '').trim();
+        const optC = String(row[cCol] || '').trim();
+        const optD = String(row[dCol] || '').trim();
+        const ans = String(row[ansCol] || '').trim().toUpperCase();
+
+        const opts = [optA, optB, optC, optD].filter(Boolean);
+        let correctLetter = 'A';
+        let correctIdx = 0;
+        let isMissing = false;
+
+        if (opts.length >= 2) {
+          if (ans.includes('A') || (optA && ans === optA.toUpperCase())) {
+            correctLetter = 'A';
+            correctIdx = 0;
+          } else if (ans.includes('B') || (optB && ans === optB.toUpperCase())) {
+            correctLetter = 'B';
+            correctIdx = 1;
+          } else if (ans.includes('C') || (optC && ans === optC.toUpperCase())) {
+            correctLetter = 'C';
+            correctIdx = 2;
+          } else if (ans.includes('D') || (optD && ans === optD.toUpperCase())) {
+            correctLetter = 'D';
+            correctIdx = 3;
+          } else {
+            isMissing = true;
+          }
+
+          cards.push({
+            id: `c-excel-${i}-${Date.now()}`,
+            front: `${qText}\n\nA. ${optA || '...'}\nB. ${optB || '...'}\nC. ${optC || '...'}\nD. ${optD || '...'}`,
+            back: `Đáp án đúng: ${correctLetter}. ${opts[correctIdx] || optA || ''}`,
+            options: [optA, optB, optC, optD],
+            correctIndex: correctIdx,
+            isAiSuggested: isMissing,
+            createdAt: Date.now(),
+          });
+        } else {
+          cards.push({
+            id: `c-excel-${i}-${Date.now()}`,
+            front: qText,
+            back: ans || 'Đáp án',
+            createdAt: Date.now(),
+          });
+        }
+      }
+
+      return res.json({
+        title: fileName.replace(/\.[^/.]+$/, '').replace(/[_\\-]/g, ' '),
+        totalFound: cards.length,
+        cards,
+      });
+    } else if (ext === 'pdf') {
+      const response = await ai.models.generateContent({
+        model: MODEL_NAME,
+        contents: [
+          { inlineData: { mimeType: 'application/pdf', data: fileBase64 } },
+          {
+            text: `Bóc tách toàn bộ các câu hỏi trắc nghiệm trong đề thi này:
+Trích xuất: question, options [A, B, C, D], correctLetter ('A'/'B'/'C'/'D'), correctIndex (0/1/2/3), explanation.
+Trích xuất đầy đủ toàn bộ từ đầu đến cuối tệp.`,
+          },
+        ],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING },
+              questions: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    question: { type: Type.STRING },
+                    options: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    correctLetter: { type: Type.STRING },
+                    correctIndex: { type: Type.INTEGER },
+                    explanation: { type: Type.STRING },
+                  },
+                  required: ['question', 'options', 'correctLetter', 'correctIndex'],
+                },
+              },
+            },
+            required: ['title', 'questions'],
+          },
+        },
+      });
+
+      const parsedPdf = JSON.parse(response.text || '{}');
+      const cards = (parsedPdf.questions || []).map((q: any, idx: number) => {
+        const optA = q.options?.[0] || '';
+        const optB = q.options?.[1] || '';
+        const optC = q.options?.[2] || '';
+        const optD = q.options?.[3] || '';
+        return {
+          id: `c-pdf-${idx}-${Date.now()}`,
+          front: `${q.question}\n\nA. ${optA}\nB. ${optB}\nC. ${optC}\nD. ${optD}`,
+          back: `Đáp án đúng: ${q.correctLetter || 'A'}. ${q.options?.[q.correctIndex || 0] || optA}`,
+          hint: q.explanation || '',
+          options: [optA, optB, optC, optD],
+          correctIndex: q.correctIndex ?? 0,
+          explanation: q.explanation || '',
+          isAiSuggested: false,
+          createdAt: Date.now(),
+        };
+      });
+
+      return res.json({
+        title: parsedPdf.title || fileName.replace(/\.[^/.]+$/, ''),
+        totalFound: cards.length,
+        cards,
+      });
+    } else {
+      rawText = buffer.toString('utf-8');
+    }
+
+    return res.json({
+      title: fileName.replace(/\.[^/.]+$/, '').replace(/[_\\-]/g, ' '),
+      rawText,
+    });
+  } catch (err: any) {
+    console.error('Error in parse-exam-file:', err);
+    return res.status(500).json({ error: err.message || 'Lỗi khi xử lý tệp trên máy chủ.' });
   }
 });
 

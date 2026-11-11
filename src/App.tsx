@@ -102,6 +102,9 @@ export default function App() {
 
   // Quick Home AI input
   const [homePasteInput, setHomePasteInput] = useState('');
+  const [aiInitialText, setAiInitialText] = useState('');
+  const [aiInitialTab, setAiInitialTab] = useState<'file' | 'text'>('file');
+  const [aiAutoGenerate, setAiAutoGenerate] = useState(false);
 
   // Initial load
   useEffect(() => {
@@ -370,10 +373,22 @@ export default function App() {
 
   // Quick Home paste trigger
   const handleQuickHomeAi = () => {
-    if (!homePasteInput.trim()) {
-      setAiCreateOpen(true);
-      return;
+    if (homePasteInput.trim()) {
+      setAiInitialText(homePasteInput);
+      setAiInitialTab('text');
+      setAiAutoGenerate(true);
+    } else {
+      setAiInitialText('');
+      setAiInitialTab('text');
+      setAiAutoGenerate(false);
     }
+    setAiCreateOpen(true);
+  };
+
+  const handleOpenUploadFile = () => {
+    setAiInitialTab('file');
+    setAiInitialText('');
+    setAiAutoGenerate(false);
     setAiCreateOpen(true);
   };
 
@@ -418,7 +433,13 @@ export default function App() {
         streak={stats.currentStreak}
         dueCount={dueCount}
         onOpenDueToday={handleStartDueReview}
-        onOpenAiCreate={() => setAiCreateOpen(true)}
+        onOpenAiCreate={() => {
+          setAiInitialTab('text');
+          setAiInitialText('');
+          setAiAutoGenerate(false);
+          setAiCreateOpen(true);
+        }}
+        onOpenUploadFile={handleOpenUploadFile}
         onOpenManualCreate={() => {
           setEditingSet(null);
           setSetEditorOpen(true);
@@ -458,39 +479,41 @@ export default function App() {
                     : 'Supports multiple choice A-B-C-D, vocabulary pairs, lecture notes, or Quizlet export.'}
                 </p>
 
-                {/* Big input field */}
-                <div className="pt-2 flex flex-col sm:flex-row gap-3">
-                  <div className="relative flex-1">
-                    <input
-                      type="text"
+                {/* Spacious multi-line input field */}
+                <div className="pt-2 space-y-3">
+                  <div className="relative">
+                    <textarea
+                      rows={3}
                       value={homePasteInput}
                       onChange={(e) => setHomePasteInput(e.target.value)}
                       placeholder={
                         lang === 'vi'
-                          ? 'Dán nội dung câu hỏi hoặc bấm Tạo Thẻ...'
-                          : 'Paste exam questions or lecture notes...'
+                          ? 'Dán bất kỳ nội dung nào vào đây (câu hỏi trắc nghiệm A-B-C-D, 200-300 câu, từ vựng, tài liệu tóm tắt)...'
+                          : 'Paste any exam questions (A-B-C-D, 200-300 questions, vocabulary, lecture notes)...'
                       }
-                      className="w-full px-4 py-3.5 rounded-2xl bg-white/10 backdrop-blur-md border border-white/25 text-white placeholder-white/60 text-sm outline-none focus:bg-white/20 transition"
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') handleQuickHomeAi();
-                      }}
+                      className="w-full p-4 rounded-2xl bg-white/10 backdrop-blur-md border border-white/25 text-white placeholder-white/60 text-xs sm:text-sm outline-none focus:bg-white/20 transition resize-y font-mono leading-relaxed"
                     />
+                    {homePasteInput.length > 0 && (
+                      <span className="absolute right-3 bottom-3 text-[11px] text-white/50 font-mono">
+                        {homePasteInput.length} {lang === 'vi' ? 'ký tự' : 'chars'}
+                      </span>
+                    )}
                   </div>
 
-                  <div className="flex flex-wrap gap-2.5">
+                  <div className="flex flex-wrap items-center gap-3">
                     <button
                       onClick={handleQuickHomeAi}
-                      className="px-6 py-3.5 rounded-2xl bg-white hover:bg-slate-50 text-indigo-700 font-black text-sm shadow-xl shadow-black/15 transition active:scale-95 flex items-center justify-center gap-2 shrink-0"
+                      className="cursor-pointer px-6 py-3.5 rounded-2xl bg-white hover:bg-slate-50 text-indigo-700 font-black text-xs sm:text-sm shadow-xl shadow-black/15 transition active:scale-95 flex items-center justify-center gap-2 shrink-0"
                     >
                       <Sparkles className="w-4 h-4 text-indigo-600" />
-                      <span>{t.createWithAi}</span>
+                      <span>{lang === 'vi' ? '⚡ Bóc Tách & Tạo Thẻ Ngay' : '⚡ Generate Flashcards Now'}</span>
                     </button>
 
                     <button
-                      onClick={() => setAiCreateOpen(true)}
-                      className="px-5 py-3.5 rounded-2xl bg-white/20 hover:bg-white/30 text-white font-bold text-sm backdrop-blur-md border border-white/30 transition active:scale-95 flex items-center justify-center gap-2 shrink-0"
+                      onClick={handleOpenUploadFile}
+                      className="cursor-pointer px-5 py-3.5 rounded-2xl bg-white/20 hover:bg-white/30 text-white font-bold text-xs sm:text-sm backdrop-blur-md border border-white/30 transition active:scale-95 flex items-center justify-center gap-2 shrink-0"
                     >
-                      <span>📂 {lang === 'vi' ? 'Đẩy file lên (Word, Excel, PDF)' : 'Upload Exam File'}</span>
+                      <span>📂 {lang === 'vi' ? 'Đẩy tệp lên (Word, Excel, PDF, TXT)' : 'Upload Exam File (.docx, .xlsx, .pdf)'}</span>
                     </button>
                   </div>
                 </div>
@@ -847,6 +870,9 @@ export default function App() {
         onClose={() => setAiCreateOpen(false)}
         onSaveSet={handleSaveSet}
         lang={lang}
+        initialText={aiInitialText}
+        initialTab={aiInitialTab}
+        autoGenerate={aiAutoGenerate}
       />
 
       {/* 2. Manual Set Editor Modal */}

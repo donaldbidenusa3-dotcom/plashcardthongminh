@@ -28,6 +28,7 @@ interface NavbarProps {
   dueCount: number;
   onOpenDueToday: () => void;
   onOpenAiCreate: () => void;
+  onOpenUploadFile?: () => void;
   onOpenManualCreate: () => void;
   onNavigateHome: () => void;
   searchQuery: string;
@@ -48,6 +49,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   dueCount,
   onOpenDueToday,
   onOpenAiCreate,
+  onOpenUploadFile,
   onOpenManualCreate,
   onNavigateHome,
   searchQuery,
@@ -203,6 +205,21 @@ export const Navbar: React.FC<NavbarProps> = ({
                     </div>
                   </div>
                 </button>
+
+                {onOpenUploadFile && (
+                  <button
+                    onClick={onOpenUploadFile}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-700/60 text-left text-xs sm:text-sm font-medium text-slate-700 dark:text-slate-200 transition"
+                  >
+                    <UploadCloud className="w-4 h-4 text-emerald-500" />
+                    <div>
+                      <div>{lang === 'vi' ? 'Đẩy tệp lên (Word, Excel, PDF)' : 'Upload Exam File'}</div>
+                      <div className="text-[10px] text-slate-400 font-normal">
+                        {lang === 'vi' ? 'Hỗ trợ 200 - 300 câu hỏi' : 'Supports 200-300 questions'}
+                      </div>
+                    </div>
+                  </button>
+                )}
 
                 <button
                   onClick={onOpenManualCreate}

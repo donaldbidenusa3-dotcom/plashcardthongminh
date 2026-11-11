@@ -64,7 +64,9 @@ export const SetDetail: React.FC<SetDetailProps> = ({
     if (onlyStarred && !c.isStarred) return false;
     if (!cardSearch.trim()) return true;
     const q = cardSearch.toLowerCase();
-    return c.front.toLowerCase().includes(q) || c.back.toLowerCase().includes(q);
+    const frontStr = (c.front || '').toLowerCase();
+    const backStr = (c.back || '').toLowerCase();
+    return frontStr.includes(q) || backStr.includes(q);
   });
 
   return (
